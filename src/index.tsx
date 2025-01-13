@@ -250,6 +250,7 @@ export async function apply(ctx: Context, config: Config) {
     // .option("link", "-l <message:text>")
     .example("ai 鲁迅为什么暴打周树人")
     .action(async (_, message) => {
+      // return;
       console.log("________ :>> ", _);
       console.log("message :>> ", message);
       console.log(config);
@@ -270,8 +271,6 @@ export async function apply(ctx: Context, config: Config) {
           config.use_markdownToImage
         ) {
           const parts = data.split("搜索结果来自：\n");
-          // console.log("parts :>> ", parts[0]);
-          // console.log("parts[1] :>> ", parts[1]);
           const imageBuffer = await ctx.markdownToImage.convertToImage(
             parts[0]
           );
@@ -323,6 +322,8 @@ export async function apply(ctx: Context, config: Config) {
       }
     });
   ctx.on("message", async (session) => {
+    //不解析bot自己的消息
+    if (session.selfId === session.userId) return;
     if (!config.analyze.analyze) return;
     if (
       session.content.includes("douyin.com") ||
