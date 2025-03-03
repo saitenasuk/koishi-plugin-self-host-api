@@ -1,7 +1,8 @@
-import { Context, Schema, h } from "koishi";
+import { log } from "console";
+import { Context, Logger, Schema, h } from "koishi";
 import {} from "koishi-plugin-markdown-to-image-service";
 
-export const name = "kimi-api";
+export const name = "self-host-api";
 
 export const inject = {
   required: ["database", "http"],
@@ -9,60 +10,63 @@ export const inject = {
 };
 
 export interface Config {
+  llm_config: LLM_config[];
+}
+
+export interface LLM_config {
   tokens: string;
   url: string;
-  use_search: any;
-  model: string;
+  modelName: string;
   multiRoundDialogue: boolean;
   use_markdownToImage: boolean;
   tips: string;
 }
 
-export const Config: Schema<Config> = Schema.object({
-  url: Schema.string()
-    .description("Api地址示例：http://127.0.0.1:8009/v1/chat/completions")
-    .required(),
-  tokens: Schema.string()
-    .description(
-      "目前kimi限制普通账号每3小时内只能进行30轮长文本的问答(短文本不限)你可以通过提供多个账号的refresh_token并使用`,`拼接"
-    )
-    .required(),
-  model: Schema.string().description("模型名称").default("kimi"),
-  // use_search: Schema.boolean().description("是否开启联网搜索").default(true),
-  // model: Schema.boolean()
-  use_search: Schema.intersect([
-    Schema.object({
-      link: Schema.boolean().description("是否开启联网搜索").default(false),
-    }),
-    Schema.union([
+export const Config: Schema<Config> = Schema.intersect([
+  Schema.object({
+    llm_config: Schema.array(
       Schema.object({
-        link: Schema.const(true).required(),
-        show_link: Schema.boolean()
-          .description("是否展示搜索结果链接")
+        name: Schema.string().description("查看模型列表时显示的名称").required(),
+        url: Schema.string()
+          .description("Api地址示例：https://api.deepseek.com")
+          .required(),
+        tokens: Schema.string().description("tokens&&apikey").required(),
+        modelName: Schema.string().description("模型名称").required(),
+        multiRoundDialogue: Schema.boolean()
+          .description("是否开启多轮对话")
+          .default(false)
+          .hidden(),
+        use_markdownToImage: Schema.boolean()
+          .description("是否开启长文本markdown转图片")
           .default(false),
-      }),
-      Schema.object({}),
-    ]),
-  ]),
-  multiRoundDialogue: Schema.boolean()
-    .description("是否开启多轮对话")
-    .default(false)
-    .hidden(),
-  use_markdownToImage: Schema.boolean()
-    .description("是否开启长文本markdown转图片")
-    .default(false),
-  tips: Schema.string().description("大模型生成时发送的提示，不填写则不发送"),
-});
+        tips: Schema.string().description(
+          "大模型生成时发送的提示，不填写则不发送"
+        ),
+      })
+    ),
+  })
+    .collapse(),
+]);
 declare module "koishi" {
   interface Tables {
-    self_host_api: SelfData;
+    self_host_api_user: hostUser;
+    self_host_api_room: hostRoom;
   }
 }
-export interface SelfData {
-  id: number;
-  qid: string;
-  conversation_id: string;
-  time: Date;
+export interface hostUser {
+  id: number; // 主键
+  qid: string; //QQid
+  modelName: string; // 默认模型，进入房间时使用的模型
+  currentRoom: string; // 用户当前所在房间
+  roomId: string[]; //房间号,用户创建的房间
+}
+export interface hostRoom {
+  id: number; // 主键
+  uid: number; //user id
+  modelName: string; // 当前房间使用的模型
+  roomName: string; // 房间名称
+  dialog_record: object; //对话记录
+  request_content: object; //多轮对话请求内容
 }
 
 const text1: string =
@@ -75,55 +79,39 @@ const text3: string =
 //解析失败文本
 const analyze_err_text: string = "可能的原因:\n\n视频已被删除或者链接不正确。";
 export async function apply(ctx: Context, config: Config) {
-  ctx.model.extend("self_host_api", {
+  //读取llm配置
+  // let llm_url;
+  // config.llm_config.map((item) => {
+  //   llm_url = {
+  //     ...llm_url,
+  //     [item.modelName]: {
+  //       url: item.url,
+  //       tokens: item.tokens,
+  //       multiRoundDialogue: item.multiRoundDialogue,
+  //       use_markdownToImage: item.use_markdownToImage,
+  //       tips: item.tips,
+  //     },
+  //   };
+  // });
+  // console.log("test1:", llm_url);
+
+  ctx.model.extend("self_host_api_user", {
     // 各字段的类型声明
-    id: "unsigned",
-    qid: "char",
-    conversation_id: "string",
-    time: "time",
+    id: "unsigned", // id
+    qid: "char", //qq号
+    modelName: "string", // 默认模型，进入房间时使用的模型
+    currentRoom: "string", //当前房间
+    roomId: "list", //房间号,用户创建的房间
+  });
+  ctx.model.extend("self_host_api_room", {
+    id: "unsigned", // id
+    uid: "unsigned", //user id
+    modelName: "string", // 当前房间使用的模型
+    roomName: "string", // 房间名称
+    dialog_record: "object", //对话记录
+    request_content: "object", //多轮对话请求内容
   });
 
-  //对话传参data
-  const dialogData = {
-    model: "kimi",
-    // conversation_id: "none",
-    messages: [
-      {
-        role: "user",
-        content: "鲁迅和周树人的关系",
-      },
-    ],
-    use_search: config.use_search,
-    stream: false,
-  };
-  //OCR传参data
-  const ocrData = {
-    model: "kimi",
-    messages: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "image_url",
-            image_url: {
-              url: "https://www.moonshot.cn/assets/logo/normal-dark.png",
-            },
-          },
-          {
-            type: "text",
-            text: "图像描述了什么？",
-          },
-        ],
-      },
-    ],
-    use_search: false,
-  };
-  const configApi = {
-    headers: {
-      Authorization: "Bearer" + " " + config.tokens,
-    },
-    timeout: 120000,
-  };
   /**
    * 实现流式响应接收
    * @param url 请求地址
@@ -131,7 +119,7 @@ export async function apply(ctx: Context, config: Config) {
    * @param config
    * @returns
    */
-  const apiFetch = async (url: string, content: any, config: any) => {
+  const deepseekAPI = async (url: string, content: any, config: any) => {
     try {
       const res = await fetch(url, {
         method: "POST",
@@ -140,8 +128,7 @@ export async function apply(ctx: Context, config: Config) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "kimi",
-          // conversation_id: "none",
+          model: "deepseek",
           messages: [
             {
               role: "user",
@@ -154,43 +141,38 @@ export async function apply(ctx: Context, config: Config) {
       });
       return res.json();
     } catch (error) {
-      console.error("error", error);
+      ctx.logger.error("error", error);
       throw error;
     }
   };
-  //接口封装
-  const queryKimiaApi = (url: string, data: any, config: any) => {
-    // 返回 ctx.http.post 的 Promise 对象
-    return ctx.http
-      .post(url, data, config)
-      .then((res) => {
-        console.log("kimi-api-response", res);
-        // console.log("choices", res.choices);
-        if (res.choices && res.choices.length > 0) {
-          return res.choices[0].message.content;
-        }
-        // 如果没有内容，可以返回 null 或者抛出错误
-        return null;
-      })
-      .catch((err) => {
-        console.error("err", err);
-        throw err; // 抛出错误，让调用者处理
-      });
-  };
-  const HybridQuery = async (msg: string) => {
+  const universalAPI = async (
+    url: string,
+    content: any,
+    model: string,
+    token: string
+  ) => {
     try {
-      const response = await fetch(
-        `https://api.example.com/data?url=${msg}&minimal=true`
-      );
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      const data = await response.json();
-      console.log("Fetched data:", data);
-      return data;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer" + " " + token,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: model,
+          messages: [
+            {
+              role: "user",
+              content: content,
+            },
+          ],
+          stream: false,
+        }),
+      });
+      return res.json();
     } catch (error) {
-      console.error("Error fetching data:", error);
-      throw error; // Re-throw the error to be handled by the caller
+      ctx.logger.error("error", error);
+      throw error;
     }
   };
   //判断是否markdown
@@ -206,214 +188,282 @@ export async function apply(ctx: Context, config: Config) {
       /\*(.*?)\*/, // 斜体
       /_(.*?)_/, // 斜体
       /`(.*?)`/, // 代码
+      /^\|.*\|$\n^\|([-:]+\|)+$(\n^\|.*\|$)*/m, // 表格
     ];
     return markdownPatterns.some((pattern) => pattern.test(text));
   }
+  // ctx.command("ai <message:text> 与ai对话").action(() => {});
   ctx
-    .command("ai <message:text> 与ai对话")
+    .command("ds <message:text> 与ai对话")
     // .option("link", "-l <message:text>")
-    .example("ai 鲁迅为什么暴打周树人")
+    .example("ds 鲁迅为什么暴打周树人")
     .action(async (_, message) => {
+      ctx.logger.info(_.session.username+"发送了："+_.source)
+      // console.log(_);
       // return;
-      console.log("________ :>> ", _);
-      console.log("message :>> ", message);
-      console.log(config);
       let tipMessageId;
       try {
-        if (config.tips)
-          tipMessageId = await _.session.send(<>{config.tips}</>);
+        if (config.llm_config[0].tips)
+          tipMessageId = await _.session.send(<>{config.llm_config[0].tips}</>);
         const startTime = Date.now(); // 记录请求开始时间
-        const res = await apiFetch(config.url, message, config);
-        console.log("res :>> ", res);
+        const res = await universalAPI(
+          config.llm_config[0].url,
+          message,
+          config.llm_config[0].modelName,
+          config.llm_config[0].tokens
+        );
         const endTime = Date.now(); // 记录请求结束时间
         const duration = endTime - startTime; // 计算请求耗时（单位：毫秒）
-        const data = res.choices[0].message.content;
-        // console.log("data :>> ", data);
+        ctx.logger.info("消息：“"+_.source+"”请求已返回，耗时"+ duration / 1000 + "秒")
+        const content = res.choices[0].message.content;
         if (
-          isMarkdown(data) &&
+          isMarkdown(content) &&
           ctx.markdownToImage &&
-          config.use_markdownToImage
+          config.llm_config[0].use_markdownToImage
         ) {
-          const parts = data.split("搜索结果来自：\n");
-          const imageBuffer = await ctx.markdownToImage.convertToImage(
-            parts[0]
-          );
+          const imageBuffer = await ctx.markdownToImage.convertToImage(content);
           await _.session.sendQueued(
             <>
               <quote id={_.session.messageId} />
               {h.image(imageBuffer, "image/png")}
-              {"生成时间" + duration / 1000 + "秒"}
+              {"生成耗时" + duration / 1000 + "秒"}
             </>
           );
-          if (
-            config.use_search.link &&
-            config.use_search.show_link &&
-            parts.length > 1
-          ) {
-            const searchSource = parts[1].split("\n\n");
-            // console.log("searchSource :>> ", searchSource);
-            await _.session.sendQueued(
-              <>
-                <message forward>
-                  {searchSource.map((item) => (
-                    <>
-                      <message>{item}</message>
-                    </>
-                  ))}
-                </message>
-              </>
-            );
-          }
+          //发送kimi检索的网址
+          // if (
+          //   config[0].use_search.link &&
+          //   config.use_search.show_link &&
+          //   parts.length > 1
+          // ) {
+          //   const searchSource = parts[1].split("\n\n");
+          //   // console.log("searchSource :>> ", searchSource);
+          //   await _.session.sendQueued(
+          //     <>
+          //       <message forward>
+          //         {searchSource.map((item) => (
+          //           <>
+          //             <message>{item}</message>
+          //           </>
+          //         ))}
+          //       </message>
+          //     </>
+          //   );
+          // }
         } else {
           _.session.send(
             <>
               <quote id={_.session.messageId} />
-              {data}
+              {content}
+              {`\n生成耗时${duration / 1000}秒`}
             </>
           );
         }
       } catch (error) {
-        console.error("error :>> ", error);
+        ctx.logger.error("error :>> ", error);
         try {
           // 尝试发送错误信息，也进行异常捕获，防止再次引发异常
           _.session.send(`出现错误：${error.message}`);
         } catch (sendError) {
-          console.error("发送错误信息时出现异常：", sendError.message);
+          ctx.logger.error("发送错误信息时出现异常：", sendError.message);
         }
       } finally {
         await _.session.cancelQueued();
         await _.session.bot.deleteMessage(_.session.channelId, tipMessageId);
       }
     });
-  // 派生式子指令
-  // ctx
-  //   .command("ai.test <message:text> 展示巨长的搜索结果")
-  //   .action(async (_, message) => {
-  //     console.log("________ :>> ", _);
-  //     console.log("message :>> ", message);
-  //     // console.log(config);
-  //     // return;
-  //     try {
-  //       const startTime = Date.now(); // 记录请求开始时间
-  //       const res = await apiFetch(config.url, message, config);
-  //       const endTime = Date.now(); // 记录请求结束时间
-  //       const duration = endTime - startTime; // 计算请求耗时（单位：毫秒）
-  //       const data = res.choices[0].message.content;
-  //       console.log("data :>> ", data);
-  //       if (
-  //         isMarkdown(data) &&
-  //         ctx.markdownToImage &&
-  //         config.use_markdownToImage
-  //       ) {
-  //         const parts = data.split("搜索结果来自：\n");
-  //         // console.log("parts :>> ", parts[0]);
-  //         // console.log("parts[1] :>> ", parts[1]);
-
-  //         const imageBuffer = await ctx.markdownToImage.convertToImage(
-  //           parts[0]
-  //         );
-  //         await _.session.sendQueued(
-  //           <>
-  //             <quote id={_.session.messageId} />
-  //             {h.image(imageBuffer, "image/png")}
-  //             {"生成时间" + duration / 1000 + "秒"}
-  //           </>
-  //         );
-  //         if (
-  //           config.use_search.link &&
-  //           config.use_search.show_link &&
-  //           parts.length > 1
-  //         ) {
-  //           const searchSource = parts[1].split("\n\n");
-  //           // console.log("searchSource :>> ", searchSource);
-  //           await _.session.sendQueued(
-  //             <>
-  //               <message forward>
-  //                 {searchSource.map((item) => (
-  //                   <>
-  //                     <message>{item}</message>
-  //                   </>
-  //                 ))}
-  //               </message>
-  //             </>
-  //           );
-  //         }
-  //       } else {
-  //         _.session.send(
-  //           <>
-  //             <quote id={_.session.messageId} />
-  //             {data}
-  //           </>
-  //         );
-  //       }
-  //     } catch (error) {
-  //       console.error("error :>> ", error);
-  //       try {
-  //         // 尝试发送错误信息，也进行异常捕获，防止再次引发异常
-  //         _.session.send(`出现错误：${error.message}`);
-  //       } catch (sendError) {
-  //         console.error("发送错误信息时出现异常：", sendError.message);
-  //       }
-  //     } finally {
-  //       await _.session.cancelQueued();
-  //     }
-  //   });
-  //API测试
-  /*  ctx
-    .command("ai.test <message:text> 测试用", { hidden: true })
-    .action(async (session, message) => {
-      console.log("message :>> ", message);
-      const res = await apiFetch(config.url, message, config);
-      const reader = res.body?.getReader();
-      const decoder = new TextDecoder();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) {
-          console.log("Stream ended.");
-          break;
-        }
-        const text = decoder.decode(value);
-        const lines = text.split("\n").filter((line) => line.trim() !== "");
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            const data = line.slice("data: ".length);
-            if (data === "[DONE]") {
-              console.log("Stream ended.");
-            } else {
-              try {
-                const jsonData = JSON.parse(data);
-                const content = jsonData.choices[0].delta.content;
-                if (content) {
-                  console.log("content :>> ", content);
-                }
-              } catch (error) {
-                console.error("Error parsing stream data:", error);
-              }
-            }
+  ctx
+    .command("dstk <message:text> 与deepseek-R1对话")
+    .action(async (_, message) => {
+      ctx.logger.info(_.session.username+"发送了："+_.source)
+      let tipMessageId;
+      try {
+        if (config.llm_config[0].tips)
+          tipMessageId = await _.session.send(<>{config.llm_config[0].tips}</>);
+        const startTime = Date.now(); // 记录请求开始时间
+        const res = await universalAPI(
+          config.llm_config[1].url,
+          message,
+          config.llm_config[1].modelName,
+          config.llm_config[1].tokens
+        );
+        console.log("res :>> ", res);
+        const endTime = Date.now(); // 记录请求结束时间
+        const duration = endTime - startTime; // 计算请求耗时（单位：毫秒）
+        ctx.logger.info("消息：“"+_.source+"”请求已返回，耗时"+ duration / 1000 + "秒")
+        const content = res.choices[0].message.content;
+        let thinkContent
+        if (
+          isMarkdown(content) &&
+          ctx.markdownToImage &&
+          config.llm_config[0].use_markdownToImage
+        ) {
+          const imageBuffer = await ctx.markdownToImage.convertToImage(content);
+          await _.session.sendQueued(
+            <>
+              <quote id={_.session.messageId} />
+              {h.image(imageBuffer, "image/png")}
+              {"生成耗时" + duration / 1000 + "秒"}
+            </>
+          );
+          if(res.choices[0].message.reasoning_content){
+            const reasoning_content = res.choices[0].message.reasoning_content;
+            thinkContent = reasoning_content
+            await _.session.sendQueued(
+              <>
+                <message forward>
+                  <>
+                    <message>思考过程</message>
+                    <message>{reasoning_content}</message>
+                  </>
+                </message>
+              </>
+            );
           }
+          
+        } else {
+          await _.session.sendQueued(
+            <>
+              <quote id={_.session.messageId} />
+              {content}
+              {`\n生成耗时${duration / 1000}秒`}
+            </>
+          );
+          if(thinkContent){
+            await _.session.sendQueued(
+              <>
+                <message forward>
+                  <>
+                  <message>思考过程</message>
+                  <message>{thinkContent}</message>
+                </>
+              </message>
+            </>
+          );
         }
+        }
+      } catch (error) {
+        ctx.logger.error("error :>> ", error);
+        try {
+          // 尝试发送错误信息，也进行异常捕获，防止再次引发异常
+          _.session.send(`出现错误：${error.message}`);
+        } catch (sendError) {
+          ctx.logger.error("发送错误信息时出现异常：", sendError.message);
+        }
+      } finally {
+        await _.session.cancelQueued();
+        await _.session.bot.deleteMessage(_.session.channelId, tipMessageId);
       }
     });
-  //合并转发消息测试
-  ctx
-    .command("ai.zf <message:text> 转发消息", { hidden: true })
-    .action(async (session, message) => {
-      console.log("message :>> ", message);
-      if (message == "1") {
-        session.session.send(
+  ctx.command("kimi <message:text> 与kimi对话").action(async (_, message) => {
+    ctx.logger.info(_.session.username+"发送了："+_.source)
+    let tipMessageId;
+    try {
+      if (config.llm_config[0].tips)
+        tipMessageId = await _.session.send(<>{config.llm_config[0].tips}</>);
+      const startTime = Date.now(); // 记录请求开始时间
+      const res = await universalAPI(
+        config.llm_config[2].url,
+        message,
+        config.llm_config[2].modelName,
+        config.llm_config[2].tokens
+      );
+      console.log("res :>> ", res);
+      const endTime = Date.now(); // 记录请求结束时间
+      const duration = endTime - startTime; // 计算请求耗时（单位：毫秒）
+      ctx.logger.info("消息：“"+_.source+"”请求已返回，耗时"+ duration / 1000 + "秒")
+      const content = res.choices[0].message.content;
+      console.log("res.choices[0] :>> ", res.choices[0]);
+      if (
+        isMarkdown(content) &&
+        ctx.markdownToImage &&
+        config.llm_config[0].use_markdownToImage
+      ) {
+        const imageBuffer = await ctx.markdownToImage.convertToImage(content);
+        await _.session.sendQueued(
           <>
-            <message>{message}</message>
+            <quote id={_.session.messageId} />
+            {h.image(imageBuffer, "image/png")}
+            {"生成耗时" + duration / 1000 + "秒"}
           </>
         );
-      } else if (true) {
-        session.session.send(
+      } else {
+        await _.session.sendQueued(
           <>
-            <message forward>
-              <message>{message}</message>
-              <message>{message}</message>
-            </message>
+            <quote id={_.session.messageId} />
+            {content}
+            {`\n生成耗时${duration / 1000}秒`}
           </>
         );
       }
-    }); */
+    } catch (error) {
+      ctx.logger.error("error :>> ", error);
+      try {
+        // 尝试发送错误信息，也进行异常捕获，防止再次引发异常
+        _.session.send(`出现错误：${error.message}`);
+      } catch (sendError) {
+        ctx.logger.error("发送错误信息时出现异常：", sendError.message);
+      }
+    } finally {
+      await _.session.cancelQueued();
+      await _.session.bot.deleteMessage(_.session.channelId, tipMessageId);
+    }
+  });
+  ctx
+    .command("doubao <message:text> 与doubao对话")
+    .action(async (_, message) => {
+      let tipMessageId;
+      try {
+        if (config.llm_config[0].tips)
+          tipMessageId = await _.session.send(<>{config.llm_config[0].tips}</>);
+        const startTime = Date.now(); // 记录请求开始时间
+        const res = await universalAPI(
+          config.llm_config[3].url,
+          message,
+          config.llm_config[3].modelName,
+          config.llm_config[3].tokens
+        );
+        console.log("res :>> ", res);
+        const endTime = Date.now(); // 记录请求结束时间
+        const duration = endTime - startTime; // 计算请求耗时（单位：毫秒）
+        const content = res.choices[0].message.content;
+        if (
+          isMarkdown(content) &&
+          ctx.markdownToImage &&
+          config.llm_config[0].use_markdownToImage
+        ) {
+          const imageBuffer = await ctx.markdownToImage.convertToImage(content);
+          await _.session.sendQueued(
+            <>
+              <quote id={_.session.messageId} />
+              {h.image(imageBuffer, "image/png")}
+              {"生成耗时" + duration / 1000 + "秒"}
+            </>
+          );
+        } else {
+          await _.session.sendQueued(
+            <>
+              <quote id={_.session.messageId} />
+              {content}
+              {`\n生成耗时${duration / 1000}秒`}
+            </>
+          );
+        }
+      } catch (error) {
+        ctx.logger.error("error :>> ", error);
+        try {
+          // 尝试发送错误信息，也进行异常捕获，防止再次引发异常
+          _.session.send(`出现错误：${error.message}`);
+        } catch (sendError) {
+          ctx.logger.error("发送错误信息时出现异常：", sendError.message);
+        }
+      } finally {
+        await _.session.cancelQueued();
+        await _.session.bot.deleteMessage(_.session.channelId, tipMessageId);
+      }
+    });
+  ctx.command("ails <message:text> 与kimil对话").action(async (_, message) => {
+    _.session.send(
+      `1.deepseek-v3 \t指令：ds \n2.deepseek-R1 \t指令：dstk \n4.kimi \t指令：kimi \n3.doubao \t指令：doubao \n5.默认模型 \t指令：ai`
+    );
+  });
 }
